@@ -1,0 +1,311 @@
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PDF to Excel Converter</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    margin: 0; padding: 0;
+    background: #f5f7fa;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+  header {
+    background: #007acc;
+    color: white;
+    padding: 1rem 2rem;
+    text-align: center;
+  }
+  main {
+    flex: 1;
+    padding: 2rem;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  h1 {
+    margin-bottom: 0.5rem;
+  }
+  p {
+    margin-top: 0;
+    color: #555;
+  }
+  #upload-section {
+    margin: 2rem 0;
+    border: 2px dashed #007acc;
+    border-radius: 8px;
+    padding: 2rem;
+    text-align: center;
+    background: #e9f2fb;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+  }
+  #upload-section.dragover {
+    background-color: #cce4fb;
+  }
+  input[type="file"] {
+    display: none;
+  }
+  button {
+    background-color: #007acc;
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    font-size: 1rem;
+    border-radius: 5px;
+    cursor: pointer;
+    margin-top: 1rem;
+  }
+  button:disabled {
+    background-color: #a0c8f8;
+    cursor: not-allowed;
+  }
+  #log {
+    margin-top: 1.5rem;
+    background: white;
+    border-radius: 6px;
+    padding: 1rem;
+    max-height: 250px;
+    overflow-y: auto;
+    box-shadow: 0 0 8px rgba(0,0,0,0.1);
+    font-family: monospace;
+    font-size: 0.9rem;
+    color: #333;
+  }
+  footer {
+    text-align: center;
+    padding: 1rem;
+    font-size: 0.9rem;
+    color: #777;
+  }
+  a {
+    color: #007acc;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>PDF to Excel Converter</h1>
+  <p>Upload multiple PDF files containing tables to convert each into individual Excel files.</p>
+</header>
+<main>
+  <label id="upload-section" for="pdf-input" tabindex="0" aria-label="Upload PDF files">
+    <strong>Click or Drag & Drop PDF files here</strong><br />
+    (Supports multiple files)
+    <input type="file" id="pdf-input" accept="application/pdf" multiple />
+  </label>
+  <button id="convert-btn" disabled>Convert to Excel</button>
+  <div id="log" aria-live="polite" aria-atomic="true"></div>
+</main>
+<footer>
+  &copy; 2024 PDF to Excel Converter &nbsp;|&nbsp; Powered by <a href="https://pdf.js.org/" target="_blank" rel="noopener noreferrer">PDF.js</a> &amp; <a href="https://sheetjs.com/" target="_blank" rel="noopener noreferrer">SheetJS</a>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.8.162/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>
+  const pdfInput = document.getElementById('pdf-input');
+  const convertBtn = document.getElementById('convert-btn');
+  const logEl = document.getElementById('log');
+  const uploadSection = document.getElementById('upload-section');
+
+  let files = [];
+
+  function log(msg, isError = false) {
+    const time = new Date().toLocaleTimeString();
+    const line = document.createElement('div');
+    line.textContent = `[${time}] ${msg}`;
+    if (isError) line.style.color = 'red';
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function resetLog() {
+    logEl.innerHTML = '';
+  }
+
+  function enableConvert(enable) {
+    convertBtn.disabled = !enable;
+  }
+
+  // Drag & Drop handlers
+  uploadSection.addEventListener('dragover', e => {
+    e.preventDefault();
+    uploadSection.classList.add('dragover');
+  });
+  uploadSection.addEventListener('dragleave', e => {
+    e.preventDefault();
+    uploadSection.classList.remove('dragover');
+  });
+  uploadSection.addEventListener('drop', e => {
+    e.preventDefault();
+    uploadSection.classList.remove('dragover');
+    const droppedFiles = Array.from(e.dataTransfer.files).filter(f => f.type === 'application/pdf');
+    if (droppedFiles.length === 0) {
+      log('No PDF files detected in dropped items.', true);
+      return;
+    }
+    files = droppedFiles;
+    pdfInput.files = createFileList(droppedFiles);
+    enableConvert(files.length > 0);
+    log(`${files.length} PDF file(s) ready for conversion.`);
+  });
+
+  // Helper to create a FileList from array (for input.files)
+  function createFileList(filesArray) {
+    const dataTransfer = new DataTransfer();
+    filesArray.forEach(f => dataTransfer.items.add(f));
+    return dataTransfer.files;
+  }
+
+  pdfInput.addEventListener('change', e => {
+    files = Array.from(e.target.files).filter(f => f.type === 'application/pdf');
+    if (files.length === 0) {
+      enableConvert(false);
+      log('No valid PDF files selected.', true);
+      return;
+    }
+    enableConvert(true);
+    resetLog();
+    log(`${files.length} PDF file(s) selected.`);
+  });
+
+  // PDF text extraction and table parsing helpers
+  async function extractTextFromPage(pdf, pageNum) {
+    const page = await pdf.getPage(pageNum);
+    const textContent = await page.getTextContent();
+    // textContent.items is an array of text chunks with position info
+    return textContent.items.map(item => ({
+      str: item.str,
+      x: item.transform[4],
+      y: item.transform[5],
+      width: item.width,
+      height: item.height,
+      fontName: item.fontName
+    }));
+  }
+
+  // Attempt to parse tables from text items by grouping text by y coordinate (rows)
+  function parseTablesFromTextItems(textItems) {
+    // Group text items by approximate y coordinate (rows)
+    const rowsMap = new Map();
+    const tolerance = 3; // pixels tolerance for grouping lines
+
+    textItems.forEach(item => {
+      // Find a row key close to item.y
+      let foundKey = null;
+      for (let key of rowsMap.keys()) {
+        if (Math.abs(key - item.y) < tolerance) {
+          foundKey = key;
+          break;
+        }
+      }
+      if (foundKey === null) {
+        rowsMap.set(item.y, [item]);
+      } else {
+        rowsMap.get(foundKey).push(item);
+      }
+    });
+
+    // Sort rows by y descending (PDF y coords go bottom to top)
+    const sortedRows = Array.from(rowsMap.entries())
+      .sort((a,b) => b[0] - a[0])
+      .map(r => r[1]);
+
+    // For each row, sort items by x ascending (left to right)
+    const rowsText = sortedRows.map(rowItems => {
+      return rowItems
+        .sort((a,b) => a.x - b.x)
+        .map(i => i.str.trim())
+        .filter(s => s.length > 0);
+    });
+
+    // Filter out empty rows
+    return rowsText.filter(r => r.length > 0);
+  }
+
+  // Convert parsed table rows to worksheet and then to Excel file
+  function createExcelFileFromTable(tableRows, filename) {
+    const ws = XLSX.utils.aoa_to_sheet(tableRows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
+    const wbout = XLSX.write(wb, {bookType:'xlsx', type:'array'});
+    const blob = new Blob([wbout], {type:"application/octet-stream"});
+    saveBlob(blob, filename);
+  }
+
+  // Save blob as file
+  function saveBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 100);
+  }
+
+  // Main conversion logic
+  async function convertFiles() {
+    resetLog();
+    enableConvert(false);
+    if (files.length === 0) {
+      log('No files to convert.', true);
+      enableConvert(true);
+      return;
+    }
+    log(`Starting conversion of ${files.length} file(s)...`);
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      log(`Processing "${file.name}"...`);
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const loadingTask = pdfjsLib.getDocument({data: arrayBuffer});
+        const pdf = await loadingTask.promise;
+        log(`- PDF loaded: ${pdf.numPages} page(s)`);
+
+        let allTables = [];
+        for (let p = 1; p <= pdf.numPages; p++) {
+          log(`-- Extracting page ${p} text...`);
+          const textItems = await extractTextFromPage(pdf, p);
+          const table = parseTablesFromTextItems(textItems);
+          if (table.length > 0) {
+            allTables = allTables.concat(table);
+          }
+        }
+
+        if (allTables.length === 0) {
+          log(`- No table data detected in "${file.name}". Creating empty Excel file.`);
+          createExcelFileFromTable([["No table data detected"]], file.name.replace(/\.pdf$/i, ".xlsx"));
+        } else {
+          log(`- Table data extracted with ${allTables.length} rows.`);
+          createExcelFileFromTable(allTables, file.name.replace(/\.pdf$/i, ".xlsx"));
+          log(`- Excel file created for "${file.name}".`);
+        }
+      } catch (err) {
+        log(`Error processing "${file.name}": ${err.message}`, true);
+      }
+    }
+    log('Conversion process completed.');
+    enableConvert(true);
+  }
+
+  convertBtn.addEventListener('click', convertFiles);
+
+  // Accessibility: allow keyboard to trigger file input on label
+  uploadSection.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      pdfInput.click();
+    }
+  });
+</script>
+</body>
+</html>
